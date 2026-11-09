@@ -99,6 +99,7 @@ def test_real_index_mutation_during_hash_is_rejected(observed_index, monkeypatch
     assert not observed_index.with_name(observed_index.name + ".sha256.json").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses to replace a file that is open for hashing")
 def test_real_index_replacement_during_hash_is_rejected(observed_index, monkeypatch):
     replacement = observed_index.with_name("replacement.sqlite")
     shutil.copyfile(observed_index, replacement)

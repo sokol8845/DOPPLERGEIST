@@ -283,6 +283,20 @@ def _file_stat_identity(info):
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
 
 
+def _path_stat_identity(path):
+    """Return a path's identity comparable with an ``os.fstat`` identity.
+
+    On Windows ``os.stat`` reports the creation time as ``st_ctime`` while
+    ``os.fstat`` reports the last change time, so an unchanged file would look
+    modified. Take the change time from an open handle there instead.
+    """
+    identity = _file_stat_identity(path.stat())
+    if os.name == "nt":
+        with path.open("rb") as stream:
+            identity[-1] = os.fstat(stream.fileno()).st_ctime_ns
+    return identity
+
+
 def _checked_sha256(path, identity=None):
     """Hash the opened file, rejecting source mutation or path replacement."""
     with path.open("rb") as stream:
@@ -291,7 +305,7 @@ def _checked_sha256(path, identity=None):
             raise OSError(f"File changed while hashing: {path}")
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
         after = _file_stat_identity(os.fstat(stream.fileno()))
-        if before != after or before != _file_stat_identity(path.stat()):
+        if before != after or before != _path_stat_identity(path):
             raise OSError(f"File changed while hashing: {path}")
     return digest
 
@@ -310,14 +324,14 @@ def cached_sha256(path):
             stack.enter_context(cache_lock(lock))
         except OSError:
             return _checked_sha256(path)
-        identity = _file_stat_identity(path.stat())
+        identity = _path_stat_identity(path)
         try:
             saved = json.loads(receipt.read_text())
             digest = saved.get("sha256")
             if (saved.get("version") == 1 and saved.get("identity") == identity and
                     isinstance(digest, str) and len(digest) == 64 and
                     all(char in "0123456789abcdef" for char in digest)):
-                current_identity = _file_stat_identity(path.stat())
+                current_identity = _path_stat_identity(path)
                 if identity == current_identity:
                     return digest
                 identity = current_identity

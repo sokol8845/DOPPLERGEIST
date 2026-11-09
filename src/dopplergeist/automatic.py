@@ -676,6 +676,41 @@ def _refinement_tracks(indexes, needed, bounds, time_range, sample_limit):
     return tracks
 
 
+def _leader_specificity(best, matched_indices, prepared_events, measurements, tracks, terrain, config):
+    """Matched negative controls for each event of the leading hypothesis.
+
+    A control that cannot be evaluated is reported as unsupported, so a
+    missing trajectory never passes the specificity gate by omission.
+    """
+    from .geometry import ecef
+    from .specificity import specificity_controls
+
+    c = float(config.get("sound_speed_mps", 343.0))
+    unavailable = lambda reason: {"supported": False, "reasons": [reason], "controls_are_calibrated": False}
+    if not tracks:
+        return [unavailable("leader_trajectories_unavailable") for _ in matched_indices]
+    try:
+        elevation = best.get("elev_m")
+        if elevation is None or not math.isfinite(float(elevation)):
+            elevation = float(terrain.sample(best["lat"], best["lon"]))
+        observer = ecef(best["lat"], best["lon"], float(elevation))
+        start = float(best["recording_start_time_s"])
+    except (KeyError, TypeError, ValueError):
+        return [unavailable("leader_geometry_unavailable") for _ in matched_indices]
+    rows = []
+    for index, flight in zip(matched_indices, best["flight_ids"]):
+        track = tracks.get(flight)
+        if track is None:
+            rows.append(dict(unavailable("trajectory_unavailable"), flight_id=flight))
+            continue
+        try:
+            control = specificity_controls(track, observer, measurements[index], start, prepared_events[index], c)
+        except (ValueError, FloatingPointError) as exc:
+            control = dict(unavailable("controls_failed"), error=str(exc)[:200])
+        rows.append(dict(control, flight_id=flight))
+    return rows
+
+
 def _decide(search, events, prepared_events, measurements, indexes, terrain, state, output, config, finish, decision_progress, *, recording=None):
     # The confidence producer supplies this adapter; missing decision machinery
     # can never turn the highest raw score into a supported location.
@@ -724,7 +759,7 @@ def _decide(search, events, prepared_events, measurements, indexes, terrain, sta
 
     retained_keys = {mode_key(row) for row in raw}
     refined_keys = set()
-    seen, track_sets = set(), {}
+    seen, track_sets, finalist_tracks = set(), {}, {}
     best_refined_score = -math.inf
     finalist_limit = max(0, int(config.get("refine_finalists", 5)))
     finalist_total = min(finalist_limit, len({mode_key(row) for row in raw}))
@@ -775,6 +810,7 @@ def _decide(search, events, prepared_events, measurements, indexes, terrain, sta
             candidate = _comparable_refinement(candidate, row, prepared_events)
             refined.append(candidate)
             refined_keys.add(key)
+            finalist_tracks.update(tracks)
             if candidate["score"] > best_refined_score:
                 best_refined_score = candidate["score"]
                 track_sets = {mode_key(candidate): tracks}
@@ -848,8 +884,20 @@ def _decide(search, events, prepared_events, measurements, indexes, terrain, sta
                    "retained_hypotheses": len(retained_keys), "refined_hypotheses": len(refined_keys),
                    "unrefined_hypotheses": len(retained_keys-refined_keys),
                    "alternatives_evaluated": search.get("alternative_modes_exhaustively_assessed") is True and search.get("status") == "complete" and not refinement_failures and not retained_keys-refined_keys}
-    matched_events = [prepared_events[i] for i in best.get("event_indices", range(len(prepared_events)))]
-    for event, evidence in zip(matched_events, best.get("event_diagnostics", [])):
+    matched_indices = list(best.get("event_indices", range(len(prepared_events))))
+    matched_events = [prepared_events[i] for i in matched_indices]
+    # Profiling can move the leader, so look tracks up by flight, not by mode key.
+    specificity = (_leader_specificity(best, matched_indices, prepared_events, measurements,
+                                       finalist_tracks, terrain, config)
+                   if rows and config.get("specificity_controls", True) else None)
+    if specificity is not None:
+        diagnostics["specificity_controls"] = {
+            "method": "matched stationary, reversed-measurement and time-shift controls (ported from AeroDoppler GeoLocator)",
+            "calibrated": False,
+            "all_events_specific": all(row["supported"] for row in specificity)}
+    for position, (event, evidence) in enumerate(zip(matched_events, best.get("event_diagnostics", []))):
+        if specificity is not None:
+            evidence = dict(evidence, specificity=specificity[position])
         for event_id in event.get("event_ids", [event["event_id"]]):
             diagnostics[event_id] = evidence
     if finite is not None:

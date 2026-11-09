@@ -399,6 +399,17 @@ def decide_location(events, candidates, coverage, *, matching_diagnostics=None, 
             return result("inconsistent_event_match", "Residuals or outliers exceed the predeclared event-fit limits.")
         if fit.get("drift_at_bound") is not False:
             return result("source_drift_unresolved", "The source-frequency drift model is missing or reaches its allowed bound.")
+        # Optional matched negative controls (stationary source, reversed
+        # measurement, shifted clock). When present they must all be rejected.
+        specificity = fit.get("specificity")
+        if specificity is not None:
+            if not isinstance(specificity, dict) or specificity.get("supported") is not True:
+                diagnostics["nonspecific_event_id"] = key
+                diagnostics["nonspecific_reasons"] = (list(specificity.get("reasons", []))
+                                                      if isinstance(specificity, dict) else ["invalid"])
+                return result("nonspecific_event_match",
+                              "A matched event is explained about as well by a stationary tone, a time-reversed "
+                              "measurement or a shifted clock; the flight association is not specific.")
 
     subset_scores = best["score_kind"] == "matched_group_support_minus_normalized_residual"
     if best["score_kind"] != "negative_robust_ridge_loss_hz" and not subset_scores:

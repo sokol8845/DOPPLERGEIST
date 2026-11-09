@@ -332,3 +332,18 @@ def test_union_cannot_repair_missing_or_clipped_leading_evidence(kind, reason):
     result = decide(bundle)
     assert result["status"] == "inconclusive"
     assert result["reason_code"] == reason
+
+
+@pytest.mark.parametrize("specificity,status,reason", [
+    ({"supported": True, "reasons": []}, "succeeded", "supported_by_evidence_checks"),
+    ({"supported": False, "reasons": ["reversed_measurement_not_rejected"]}, "inconclusive", "nonspecific_event_match"),
+    ("not-a-mapping", "inconclusive", "nonspecific_event_match"),
+])
+def test_matched_negative_controls_gate_acceptance(specificity, status, reason):
+    events, candidates, coverage, diag = evidence()
+    diag["e1"]["specificity"] = specificity
+    result = decide((events, candidates, coverage, diag))
+    assert result["status"] == status
+    assert result.get("reason_code") == reason
+    if status == "inconclusive":
+        assert result["diagnostics"]["nonspecific_event_id"] == "e1"
